@@ -1,0 +1,12 @@
+# R files
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# Large data files
+*.pkl
+*.gz
+*.hdf5
+*.rds
+*.RData
