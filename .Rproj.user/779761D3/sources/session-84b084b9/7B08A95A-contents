@@ -1,0 +1,253 @@
+# Run MOFA
+MOFAobject <- run_mofa(
+  MOFAobject,
+  outfile = "03_Results/MOFA2_model.hdf5",
+  use_basilisk = FALSE
+)
+
+# Calculate variance explained
+var_explained <- calculate_variance_explained(MOFAobject)
+print(var_explained)
+
+# Save variance explained
+write.csv(var_explained$r2_total$group1, "03_Results/MOFA2_variance_explained.csv")
+
+print("Saved!")
+
+# Plot variance explained
+plot_variance_explained(MOFAobject)
+
+# Get the factors
+factors <- get_factors(MOFAobject)
+head(factors[[1]])
+
+# Get the weights for RNA
+weights_rna <- get_weights(MOFAobject, views = "RNA")
+head(weights_rna$RNA)
+
+# Get the weights for Methylation
+weights_methyl <- get_weights(MOFAobject, views = "Methylation")
+head(weights_methyl$Methylation)
+
+# Plot factors
+plot_factor(MOFAobject, factors = 1:4, dot_size = 1)
+
+# Get the factors matrix
+factors_matrix <- get_factors(MOFAobject)[[1]]
+
+# Perform clustering (K-means, 3 clusters as a start)
+set.seed(123)
+kmeans_result <- kmeans(factors_matrix, centers = 3, nstart = 25)
+
+# Add clusters to factors
+factors_clusters <- data.frame(
+  Sample = rownames(factors_matrix),
+  Cluster = kmeans_result$cluster
+)
+
+# Check the number of samples per cluster
+table(factors_clusters$Cluster)
+
+library(ggplot2)
+
+# Get the factors matrix
+factors_matrix <- get_factors(MOFAobject)[[1]]
+
+# Add clusters
+factors_df <- data.frame(
+  Factor1 = factors_matrix[,1],
+  Factor2 = factors_matrix[,2],
+  Cluster = as.factor(factors_clusters$Cluster)
+)
+
+# Plot
+ggplot(factors_df, aes(x = Factor1, y = Factor2, color = Cluster)) +
+  geom_point(size = 1.5, alpha = 0.7) +
+  theme_classic() +
+  labs(title = "MOFA2 Factors Colored by Cluster",
+       x = "Factor 1", y = "Factor 2")
+
+# Find common samples
+common_samples <- intersect(rownames(factors_matrix), rownames(clinical))
+
+# Use cat instead of print
+cat("Common samples:", length(common_samples), "\n")
+
+# Subset the clinical data
+clinical_subset <- clinical[common_samples, ]
+
+# Check dimensions
+dim(clinical_subset)
+
+# Check the distribution of the Integrated Clusters
+table(clinical_subset$Integrated_Clusters_no_exp_nature2012)
+
+# Check the columns related to subtypes
+grep("Cluster|Subtype|PAM50|ER_Status|HER2", colnames(clinical_subset), value = TRUE)
+
+# Check PAM50 distribution
+table(clinical_subset$PAM50_mRNA_nature2012)
+
+# Create a contingency table
+clusters_df <- data.frame(
+  Sample = rownames(factors_matrix),
+  MOFA_Cluster = factors_clusters$Cluster,
+  PAM50 = clinical_subset$PAM50_mRNA_nature2012
+)
+
+# Check
+table(clusters_df$MOFA_Cluster, clusters_df$PAM50)
+
+# Create survival data
+survival_df <- data.frame(
+  Sample = rownames(factors_matrix),
+  MOFA_Cluster = factors_clusters$Cluster,
+  Days_to_Death = clinical_subset$Days_to_date_of_Death_nature2012,
+  Days_to_Last_Contact = clinical_subset$Days_to_Date_of_Last_Contact_nature2012,
+  Vital_Status = clinical_subset$Vital_Status_nature2012
+)
+
+# Check
+head(survival_df)
+table(survival_df$Vital_Status)
+
+library(survival)
+library(survminer)
+
+# Create time and status columns
+survival_df$Time <- ifelse(
+  survival_df$Vital_Status == "DECEASED",
+  survival_df$Days_to_Death,
+  survival_df$Days_to_Last_Contact
+)
+
+survival_df$Status <- ifelse(survival_df$Vital_Status == "DECEASED", 1, 0)
+
+# Remove NA
+survival_df <- na.omit(survival_df)
+
+# Check
+head(survival_df)
+table(survival_df$Status)
+
+# Reload the clinical data (to start fresh)
+clinical <- read.csv("01_Data/BRCA_Clinical.txt", sep="\t", row.names = 1, check.names = FALSE)
+
+# Subset to common samples
+clinical_subset <- clinical[common_samples, ]
+
+# Create time column: use Days_to_Death if deceased, else Days_to_Last_Contact
+clinical_subset$Time <- ifelse(
+  clinical_subset$Vital_Status_nature2012 == "DECEASED",
+  clinical_subset$Days_to_date_of_Death_nature2012,
+  clinical_subset$Days_to_Date_of_Last_Contact_nature2012
+)
+
+# Create status column: 1 if deceased, 0 if living
+clinical_subset$Status <- ifelse(
+  clinical_subset$Vital_Status_nature2012 == "DECEASED", 1, 0
+)
+
+# Remove rows with NA in Time
+clinical_surv <- clinical_subset[!is.na(clinical_subset$Time), ]
+
+# Check
+table(clinical_surv$Status)
+
+
+dim(clinical_surv)
+
+library(survival)
+library(survminer)
+
+# Add clusters to survival data
+clinical_surv$Cluster <- factors_clusters$Cluster[match(rownames(clinical_surv), rownames(factors_clusters))]
+
+# Check
+table(clinical_surv$Cluster)
+
+# Create survival object
+surv_object <- Surv(time = clinical_surv$Time, event = clinical_surv$Status)
+
+# Fit Kaplan-Meier
+km_fit <- survfit(surv_object ~ Cluster, data = clinical_surv)
+
+# Plot
+ggsurvplot(
+  km_fit,
+  data = clinical_surv,
+  pval = TRUE,
+  risk.table = TRUE,
+  title = "Kaplan-Meier Survival Curves by MOFA2 Cluster"
+)
+
+# Get the weights for RNA
+weights_rna <- get_weights(MOFAobject, views = "RNA")$RNA
+
+# Get top genes for Factor 1 and 2
+top_genes_factor1 <- names(sort(abs(weights_rna[,1]), decreasing = TRUE)[1:100])
+top_genes_factor2 <- names(sort(abs(weights_rna[,2]), decreasing = TRUE)[1:100])
+
+# Check
+head(top_genes_factor1)
+head(top_genes_factor2)
+
+# Install clusterProfiler if not available
+if (!require("clusterProfiler")) {
+  BiocManager::install("clusterProfiler")
+}
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+# Convert gene symbols to Entrez IDs
+entrez_factor1 <- bitr(top_genes_factor1, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+# Run GO enrichment
+go_factor1 <- enrichGO(
+  gene = entrez_factor1$ENTREZID,
+  OrgDb = org.Hs.eg.db,
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05
+)
+
+# Check
+head(go_factor1)
+
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+# Use only top 50 genes to save memory
+top_genes_factor1 <- top_genes_factor1[1:50]
+
+# Convert to Entrez IDs
+entrez_factor1 <- bitr(
+  top_genes_factor1,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = org.Hs.eg.db
+)
+
+# Run GO enrichment
+go_factor1 <- enrichGO(
+  gene = entrez_factor1$ENTREZID,
+  OrgDb = org.Hs.eg.db,
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05
+)
+
+# Check
+head(go_factor1)
+
+# Use top 50 genes but for KEGG (lighter than GO)
+kegg_factor1 <- enrichKEGG(
+  gene = entrez_factor1$ENTREZID,
+  organism = "hsa",
+  pvalueCutoff = 0.05
+)
+
+# Check
+head(kegg_factor1)
